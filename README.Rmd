@@ -1,3 +1,11 @@
+---
+title: "README"
+author: "Emily"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+
 # Fraser seasonal black carbon
 
 This repository contains the datasets and R markdown file used to produce figures and tables in the manuscript "Interplay of seasonal hydrology and landscape topography drives black carbon export in the Fraser River" by Emily Brown, Sasha Wagner, and Brian P. V. Hunt.
@@ -11,3 +19,8 @@ Snow water equivalent (SWE) data ("SW_DailyArchive.csv", "SWDaily.csv") is open 
 Burned area data ("fire_perimeters_2023.csv", "fire_perimeters_2024.csv") is open source from the British Columbia Wildfire Service, and can be accessed from https://catalogue.data.gov.bc.ca/dataset/bc-wildfire-fire-perimeters-historical and https://catalogue.data.gov.bc.ca/dataset/bc-wildfire-fire-perimeters-current.
 
 To reproduce the figures and tables in this manuscript, clone this repository and use the R markdown file "figures_and_tables.Rmd".
+
+
+```{r}
+sessioninfo::session_info()
+```
