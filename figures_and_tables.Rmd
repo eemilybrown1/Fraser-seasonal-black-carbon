@@ -1,0 +1,768 @@
+---
+title: "figures_and_tables"
+author: "Emily"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Library packages
+
+```{r}
+library(tidyverse)
+library(here)
+library(gt)
+library(Hmisc)
+library(corrplot)
+library(cowplot)
+library(janitor)
+library(ggpubr)
+library(knitr)
+```
+
+
+#   Load BC data
+```{r}
+BC <- read.csv(here::here("Brown_fraserseasonalblackcarbon_data.csv")) %>%
+  clean_names()
+
+
+loadest <- read.csv(here::here("hopedischarge_loadestflux.csv"))
+```
+
+
+
+#   Process BC data for Table 1
+
+##    Wide version loadest dataset
+```{r}
+loadest_wide <- loadest %>%
+  select(c(date,
+           hope_discharge_m3_s,
+           carbon_class,
+           AMLE_loadest)) %>%
+  group_by(date, carbon_class) %>%
+  summarise(hope_discharge_m3_s = mean(hope_discharge_m3_s, na.rm = TRUE),
+            AMLE_average = mean(AMLE_loadest, na.rm = TRUE)) %>%
+  pivot_wider(id_cols = c(date, hope_discharge_m3_s),
+              names_from = carbon_class,
+              values_from = AMLE_average) %>%
+  rename(dbc_flux_tonnes_day = DBC,
+         doc_flux_tonnes_day = DOC,
+         pbc_flux_tonnes_day = PBC)
+
+```
+
+
+##    Selecting columns for correlation matrix
+```{r}
+cormatdata_incldate <- BC %>%
+  filter(site == "Hope") %>%
+  left_join(loadest_wide %>% select(date, hope_discharge_m3_s, dbc_flux_tonnes_day, pbc_flux_tonnes_day)) %>%
+  select(c(date, 
+           dbc_concentration_mg_l, dbc_flux_tonnes_day, dbc_b6ca_b5ca,
+           pbc_concentration_mg_l, pbc_flux_tonnes_day, pbc_b6ca_b5ca,
+           hope_discharge_m3_s, doc_concentration_mg_l)) %>%
+  mutate(year = year(date), 
+         month = month(date)) %>%
+  select(year, month, everything()) %>%
+  select(-date)
+
+```
+
+
+
+#   Load and process environmental data for Table 1
+
+##    SWE
+```{r}
+#Identifying station ID's within the watershed of the Fraser River at Hope
+stations <- read.csv(here::here("SNW_ASWS_BC08MF0001watershed.csv"))%>%
+  mutate(TYPE = "Automatic") %>%
+  filter(STATUS == "Active") %>%
+  select(c(LCTN_ID)) %>%
+  pull()
+
+
+#Current season data
+SWE_current_raw <- read.csv(here::here("SWDaily.csv")) 
+
+SWE_current <- SWE_current_raw %>%
+  mutate(Date = as.Date(DATE.UTC.)) %>%
+  select(Date, 2:111) %>%
+  rename_with(.fn = \(x)sub("X","",x)) %>%
+  rename_with(.fn = \(x)str_extract(x, pattern = "[^.]+")) %>%
+  aggregate(.~Date, 
+            FUN = mean,
+            na.rm = TRUE, na.action = NULL) %>%
+  mutate_at(2:110, function(x) ifelse(is.nan(x), NA, x)) %>%
+  filter(Date <= '2024-02-29')
+
+
+#Archive data
+SWE_archive_raw <- read.csv(here::here("SW_DailyArchive.csv")) 
+
+SWE_archive <- SWE_archive_raw %>%
+  mutate(Date = as.Date(DATE.UTC.)) %>%
+  select(Date, 2:111) %>%
+  rename_with(.fn = \(x)sub("X","",x)) %>%
+  rename_with(.fn = \(x)str_extract(x, pattern = "[^.]+")) %>%
+  aggregate(.~Date, 
+            FUN = mean,
+            na.rm = TRUE, na.action = NULL) %>%
+  mutate_at(2:110, function(x) ifelse(is.nan(x), NA, x)) %>%
+  filter(Date >= '2023-02-01')
+
+
+#Combining current season and archive data, and select only stations within the watershed of the Fraser River at Hope
+SWE_daily <- full_join(SWE_archive, SWE_current) %>%
+  pivot_longer(cols = 2:121,
+               names_to = "station",
+               values_to = "SWE_mm") %>%
+  filter(station %in% stations)
+
+
+#Summarize by month
+SWE_monthly <- SWE_daily %>%
+  group_by(year(Date), month(Date)) %>%
+  summarise(SWE_avg_mm = mean(SWE_mm, na.rm = TRUE)) %>%
+  rename("year" = "year(Date)",
+         "month" = "month(Date)") %>%
+    mutate_all(function(x) ifelse(is.nan(x), NA, x))
+
+
+#Calculate monthly change 
+SWE_monthly_change <- SWE_monthly %>%
+  ungroup() %>%
+  arrange(year, month) %>%
+  mutate(SWE_diff_mm = SWE_avg_mm - lag(SWE_avg_mm)) %>%
+  filter(!(year == "2023" & month == "2"))
+
+
+#Only keeping negative values for snowmelt
+SWE_melt_monthly <- SWE_monthly_change %>%
+  mutate(SWE_melt_mm = ifelse(SWE_diff_mm < 0,
+                              -SWE_diff_mm,
+                              0))
+```
+
+
+##    Burned area
+```{r}
+fire_archive_raw <- read.csv(here::here("fire_perimeters_2023.csv"))
+fire_current_raw <- read.csv(here::here("fire_perimeters_2024.csv"))
+
+fire_raw <- full_join(fire_archive_raw, fire_current_raw)
+
+fire_monthly <- fire_raw %>%
+  select(FIRE_DATE, AREA_SQM) %>%
+  mutate(FIRE_DATE = ymd(FIRE_DATE)) %>%
+  filter(FIRE_DATE >= '2023-03-01' & FIRE_DATE <= '2024-02-28') %>%
+  mutate(year = year(FIRE_DATE),
+         month = month(FIRE_DATE)) %>%
+  select(-FIRE_DATE) %>%
+  group_by(year, month) %>%
+  summarise(burned_area_m2 = sum(AREA_SQM))
+```
+
+
+#    Table 1: Correlation matrix
+
+##   Join datasets
+```{r}
+cormatdata_incldate <- cormatdata_incldate %>%
+  left_join(SWE_melt_monthly) %>%
+  select(-SWE_avg_mm, -SWE_diff_mm)
+
+cormatdata_incldate <- cormatdata_incldate %>%
+  left_join(fire_monthly) %>%
+  mutate(burned_area_m2 = replace_na(burned_area_m2, 0))
+
+cormatdata <- cormatdata_incldate %>%
+  select(-month, -year) %>%
+  mutate_all(~as.numeric(.))
+```
+
+
+
+##   Run correlation matrix
+```{r}
+
+# Calculate correlation matrix
+res <- rcorr(as.matrix(cormatdata))
+
+# Extract correlation coefficients (complete table, presented in supporting information)
+resr <- res$r
+
+# Select columns and rows for table 1
+resr_table1 <- res$r[c(7:10) , c(1:6)]
+
+# Extract p-values (complete table, presented in supporting information)
+resp <- res$P
+
+# Select columns and rows for table 1
+resp_table1 <- res$P[c(7:10) , c(1:6)]
+
+
+```
+
+
+##  Format tibble for cor coefficients (res) and p values (res2p)
+```{r}
+cortable <- resr_table1 %>%
+  as_tibble(rownames = NA) %>%
+  rownames_to_column() %>%
+  rename_with(~paste0(.x, "_corcoef"), -rowname)
+
+cortable_p <- resp_table1 %>%
+  as_tibble(rownames = NA) %>%
+  rownames_to_column() %>%
+  rename_with(~paste0(.x, "_p"), -rowname)
+
+cortable <- left_join(cortable, cortable_p)
+
+#Round correlation coefficient values
+cortable <- cortable %>%
+  mutate_at(c(2:10), ~round(.x, digits = 3))
+
+
+#Adding significance stars
+cortable <- cortable %>%
+  mutate(dbc_concentration_mg_l_corcoef = ifelse(dbc_concentration_mg_l_p <= 0.001,
+                                     paste0(dbc_concentration_mg_l_corcoef, "***"),
+                                     ifelse(dbc_concentration_mg_l_p <= 0.01,
+                                            paste0(dbc_concentration_mg_l_corcoef, "**"),
+                                            ifelse(dbc_concentration_mg_l_p<= 0.05,
+                                                   paste0(dbc_concentration_mg_l_corcoef, "*"),
+                                                   dbc_concentration_mg_l_corcoef))),
+                                            
+         dbc_flux_tonnes_day_corcoef = ifelse(dbc_flux_tonnes_day_p <= 0.001,
+                                              paste0(dbc_flux_tonnes_day_corcoef, "***"),
+                                               ifelse(dbc_flux_tonnes_day_p <= 0.01,
+                                                      paste0(dbc_flux_tonnes_day_corcoef, "**"),
+                                                      ifelse(dbc_flux_tonnes_day_p<= 0.05,
+                                                             paste0(dbc_flux_tonnes_day_corcoef, "*"),
+                                                             dbc_flux_tonnes_day_corcoef))),
+           
+         dbc_b6ca_b5ca_corcoef =  ifelse(dbc_b6ca_b5ca_p <= 0.001,
+                                              paste0(dbc_b6ca_b5ca_corcoef, "***"),
+                                               ifelse(dbc_b6ca_b5ca_p <= 0.01,
+                                                      paste0(dbc_b6ca_b5ca_corcoef, "**"),
+                                                      ifelse(dbc_b6ca_b5ca_p<= 0.05,
+                                                             paste0(dbc_b6ca_b5ca_corcoef, "*"),
+                                                             dbc_b6ca_b5ca_corcoef))),
+         
+         pbc_concentration_mg_l_corcoef = ifelse(pbc_concentration_mg_l_p <= 0.001,
+                                     paste0(pbc_concentration_mg_l_corcoef, "***"),
+                                     ifelse(pbc_concentration_mg_l_p <= 0.01,
+                                            paste0(pbc_concentration_mg_l_corcoef, "**"),
+                                            ifelse(pbc_concentration_mg_l_p<= 0.05,
+                                                   paste0(pbc_concentration_mg_l_corcoef, "*"),
+                                                   pbc_concentration_mg_l_corcoef))),
+                                            
+         pbc_flux_tonnes_day_corcoef = ifelse(pbc_flux_tonnes_day_p <= 0.001,
+                                              paste0(pbc_flux_tonnes_day_corcoef, "***"),
+                                               ifelse(pbc_flux_tonnes_day_p <= 0.01,
+                                                      paste0(pbc_flux_tonnes_day_corcoef, "**"),
+                                                      ifelse(pbc_flux_tonnes_day_p<= 0.05,
+                                                             paste0(pbc_flux_tonnes_day_corcoef, "*"),
+                                                             pbc_flux_tonnes_day_corcoef))),
+           
+         pbc_b6ca_b5ca_corcoef =  ifelse(pbc_b6ca_b5ca_p <= 0.001,
+                                              paste0(pbc_b6ca_b5ca_corcoef, "***"),
+                                               ifelse(pbc_b6ca_b5ca_p <= 0.01,
+                                                      paste0(pbc_b6ca_b5ca_corcoef, "**"),
+                                                      ifelse(pbc_b6ca_b5ca_p<= 0.05,
+                                                             paste0(pbc_b6ca_b5ca_corcoef, "*"),
+                                                             pbc_b6ca_b5ca_corcoef)))
+         
+         
+         )
+```
+
+
+##    Select final table
+```{r, results = 'asis'}
+table1 <- cortable %>%
+  select(c(rowname,
+           dbc_concentration_mg_l_corcoef,
+           dbc_flux_tonnes_day_corcoef,
+           dbc_b6ca_b5ca_corcoef,
+           pbc_concentration_mg_l_corcoef,
+           pbc_flux_tonnes_day_corcoef,
+           pbc_b6ca_b5ca_corcoef)) %>%
+  rename("DBC concentration (mg/L)" = "dbc_concentration_mg_l_corcoef",
+         "DBC flux (tonnes/day)" = "dbc_flux_tonnes_day_corcoef",
+         "DBC B6CA:B5CA" = "dbc_b6ca_b5ca_corcoef",
+         "PBC concentration (mg/L)" = "pbc_concentration_mg_l_corcoef",
+         "PBC flux (tonnes/day)" = "pbc_flux_tonnes_day_corcoef",
+         "PBC B6CA:B5CA" = "pbc_b6ca_b5ca_corcoef") %>%
+  mutate(rowname = c("River discharge",
+                     "DOC concentration",
+                     "Snow melt",
+                     "Active fire burned area"))
+           
+kable(table1)
+```
+
+
+
+#   Figure 2
+```{r}
+BC_hope <- BC %>%
+  filter(site == "Hope") 
+
+
+BC_hope_summarized_flux <- left_join(BC_hope, 
+                                     loadest_wide)
+
+BC_hope_conc_flux <- BC_hope_summarized_flux %>%
+  select(date,
+         hope_discharge_m3_s,
+         dbc_concentration_mg_l,
+         pbc_concentration_mg_l,
+         dbc_flux_tonnes_day,
+         pbc_flux_tonnes_day,
+         dbc_b6ca_b5ca,
+         pbc_b6ca_b5ca) %>%
+  mutate(across(hope_discharge_m3_s:pbc_b6ca_b5ca, ~as.numeric(.))) %>%
+  pivot_longer(cols = starts_with(c("dbc", "pbc")),
+               names_to = c(".value", "measurement"),
+               names_pattern = "(dbc|pbc)_(.*)") %>%
+  mutate(date = as.Date(date))
+
+  
+```
+
+Load and prep discharge data
+```{r}
+#Discharge data
+Hope_discharge <- loadest %>%
+  select(date:hope_discharge_m3_s)
+
+#Date format
+Hope_discharge <- Hope_discharge %>%
+  mutate(date = as.Date(date))
+
+#Summarizing by day
+Hope_discharge_daily <- Hope_discharge %>%
+  group_by(date) %>%
+  summarise(hope_discharge_m3_s = mean(hope_discharge_m3_s))
+```
+
+Join datasets
+```{r}
+fig2data <- full_join(Hope_discharge_daily, BC_hope_conc_flux)
+```
+
+##    Panel a: Concentration
+```{r}
+rescale_conc <- 8974.525 / 0.58935
+
+BC_hope_conc_plot <-  filter(fig2data, measurement %in% c(NA, "concentration_mg_l")) %>%
+  ggplot(aes(x = date)) +
+  
+  geom_point(data = filter(fig2data, measurement == "concentration_mg_l"),
+                aes(y = dbc,
+                color = "DBC")) +
+  geom_line(data = filter(fig2data, measurement == "concentration_mg_l"),
+                aes(y = dbc,
+                color = "DBC",
+                linetype = "DBC")) +
+  
+  geom_point(data = filter(fig2data, measurement == "concentration_mg_l"),
+                aes(y = pbc,
+                color = "PBC")) +
+  geom_line(data = filter(fig2data, measurement == "concentration_mg_l"),
+                aes(y = pbc,
+                color = "PBC",
+                linetype = "PBC")) +
+  
+  geom_line(aes(y = hope_discharge_m3_s / rescale_conc,
+                color = "Discharge",
+                linetype = "Discharge")) +
+  
+  theme_classic() +
+  scale_x_date(limits = as.Date(c('1/3/2023', '28/2/2024'), format="%d/%m/%Y"),
+               date_breaks = "1 month",
+               date_labels = "%b %Y") +
+  labs(x = NULL) +
+  theme(axis.text.x = element_text(angle = 90),
+        legend.position = "none",
+        axis.title = element_text(size = 18),
+        axis.text = element_text(size = 14)) +
+  scale_color_manual(name = "Legend",
+                     breaks = c("DBC",
+                                "PBC",
+                                "DBC:DOC (%)",
+                                "Discharge"),
+                     values = c("#1B9E77",
+                                "#D95F02",
+                                "#7570B3",
+                                "#666666")) + 
+  scale_linetype_manual(name = "Legend", 
+                        breaks = c("DBC",
+                                "PBC",
+                                "DBC:DOC (%)",
+                                "Discharge"),
+                        values = c("solid",
+                                   "solid",
+                                   "solid",
+                                   "dashed")) + # Setting line type for Discharge line
+  scale_y_continuous(name = expression('Concentration (mg L'^-1*')'),
+                labels = scales::comma,
+                sec.axis = sec_axis(~.*rescale_conc, name = expression('River discharge (m'^3*'s'^-1*')'),
+                                         labels = scales::comma))
+
+```
+
+
+
+
+##    Panel b: Flux 
+```{r}
+rescale_flux <- 8974.525 / 178
+
+BC_hope_flux_plot <-  filter(fig2data, measurement %in% c(NA, "flux_tonnes_day")) %>%
+  ggplot(aes(x = date)) +
+  
+  geom_point(data = filter(fig2data, measurement == "flux_tonnes_day"),
+                aes(y = dbc,
+                color = "DBC")) +
+  geom_line(data = filter(fig2data, measurement == "flux_tonnes_day"),
+                aes(y = dbc,
+                color = "DBC",
+                linetype = "DBC")) +
+  
+  geom_point(data = filter(fig2data, measurement == "flux_tonnes_day"),
+                aes(y = pbc,
+                color = "PBC")) +
+  geom_line(data = filter(fig2data, measurement == "flux_tonnes_day"),
+                aes(y = pbc,
+                color = "PBC",
+                linetype = "PBC")) +
+  
+  geom_line(aes(y = hope_discharge_m3_s / rescale_flux,
+                color = "Discharge",
+                linetype = "Discharge")) +
+  
+  theme_classic() +
+  scale_x_date(limits = as.Date(c('1/3/2023', '28/2/2024'), format="%d/%m/%Y"),
+               date_breaks = "1 month",
+               date_labels = "%b %Y") +
+  labs(x = NULL) +
+  theme(axis.text.x = element_text(angle = 90),
+        legend.position = "none",
+        axis.title = element_text(size = 18),
+        axis.text = element_text(size = 14)) +
+  scale_color_manual(name = "Legend",
+                     breaks = c("DBC",
+                                "PBC",
+                                "DBC:DOC (%)",
+                                "Discharge"),
+                     values = c("#1B9E77",
+                                "#D95F02",
+                                "#7570B3",
+                                "#666666")) + 
+  scale_linetype_manual(name = "Legend", 
+                        breaks = c("DBC",
+                                "PBC",
+                                "DBC:DOC (%)",
+                                "Discharge"),
+                        values = c("solid",
+                                   "solid",
+                                   "solid",
+                                   "dashed")) + # Setting line type for Discharge line
+  scale_y_continuous(name = expression('Flux (Mg d'^-1*')'),
+                labels = scales::comma,
+                sec.axis = sec_axis(~.*rescale_flux, name = expression('River discharge (m'^3*'s'^-1*')'),
+                                         labels = scales::comma))
+
+
+```
+
+
+##    Panel c: DBC B6CA:B5CA
+
+```{r}
+# Calculate the rescaling factor
+rescale_formula_d <- function(x) { ((84787.54*x) - 30523.51) }
+unscale_formula_d <- function(x) { ((x + 30523.51)/84787.54)}
+
+#plot DBC
+BC_hope_dbc_bpca_plot <-  filter(fig2data, measurement %in% c(NA, "b6ca_b5ca")) %>% ggplot(aes(x = date)) + 
+  geom_point(data = filter(fig2data, measurement == "b6ca_b5ca"),
+                aes(y = dbc,
+                color = "DBC")) +
+  geom_line(data = filter(fig2data, measurement == "b6ca_b5ca"),
+                aes(y = dbc,
+                color = "DBC",
+                linetype = "DBC")) +
+  
+  geom_line(aes(y = unscale_formula_d(hope_discharge_m3_s), 
+                color = "Discharge", 
+                linetype = "Discharge")) +
+  
+  theme_classic() +
+  scale_x_date(limits = as.Date(c('1/3/2023', '28/2/2024'), format="%d/%m/%Y"),
+               date_breaks = "1 month",
+               date_labels = "%b %Y") +
+  labs(x = NULL) +
+  theme(axis.text.x = element_text(angle = 90),
+        legend.position = "none",
+        axis.title = element_text(size = 18),
+        axis.text = element_text(size = 14)) +
+  scale_color_manual(name = "Legend",
+                     breaks = c("DBC",
+                                "PBC",
+                                "DBC:DOC (%)",
+                                "Discharge"),
+                     values = c("#1B9E77",
+                                "#D95F02",
+                                "#7570B3",
+                                "#666666")) + 
+  scale_linetype_manual(name = "Legend", 
+                        breaks = c("DBC",
+                                "PBC",
+                                "DBC:DOC (%)",
+                                "Discharge"),
+                        values = c("solid",
+                                   "solid",
+                                   "solid",
+                                   "dashed")) + # Setting line type for Discharge line
+  
+  scale_y_continuous(name = "B6CA:B5CA", labels = scales::comma, limits = c(0.36, 0.47),
+                     sec.axis = sec_axis(~ rescale_formula_d(.), 
+                                         name = expression('River discharge (m'^3*'s'^-1*')', 
+                                         labels = scales::comma)))
+
+```
+
+
+
+##    Panel d: PBC B6CA:B5CA
+```{r}
+# Calculate the rescaling factor
+rescale_factor_p <- (max(fig2data$hope_discharge_m3_s, na.rm = TRUE))/2.0018000
+
+#plot PBC
+BC_hope_pbc_bpca_plot <-  filter(fig2data, measurement %in% c(NA, "b6ca_b5ca")) %>% ggplot(aes(x = date)) + 
+  geom_point(data = filter(fig2data, measurement == "b6ca_b5ca"),
+                aes(y = pbc,
+                color = "PBC")) +
+  geom_line(data = filter(fig2data, measurement == "b6ca_b5ca"),
+                aes(y = pbc,
+                color = "PBC",
+                linetype = "PBC")) +
+
+  geom_line(aes(y = hope_discharge_m3_s / rescale_factor_p,
+                color = "Discharge",
+                linetype = "Discharge")) +  # Rescale discharge values
+  
+  theme_classic() +
+  scale_x_date(limits = as.Date(c('1/3/2023', '28/2/2024'), format="%d/%m/%Y"),
+               date_breaks = "1 month",
+               date_labels = "%b %Y") +
+  labs(x = NULL) +
+  theme(axis.text.x = element_text(angle = 90),
+        legend.position = "none",
+        axis.title = element_text(size = 18),
+        axis.text = element_text(size = 14)) +
+  scale_color_manual(name = "Legend",
+                     breaks = c("DBC",
+                                "PBC",
+                                "DBC:DOC (%)",
+                                "Discharge"),
+                     values = c("#1B9E77",
+                                "#D95F02",
+                                "#7570B3",
+                                "#666666")) + 
+  scale_linetype_manual(name = "Legend", 
+                        breaks = c("DBC",
+                                "PBC",
+                                "DBC:DOC (%)",
+                                "Discharge"),
+                        values = c("solid",
+                                   "solid",
+                                   "solid",
+                                   "dashed")) + # Setting line type for Discharge line
+  
+  scale_y_continuous(name = "B6CA:B5CA",
+                labels = scales::comma,
+                sec.axis = sec_axis(~.*rescale_factor_p, 
+                                    name = expression('River discharge (m'^3*'s'^-1*')'),
+                                    labels = scales::comma))
+
+```
+
+
+
+
+##    Pabel e: DBC:DOC%
+
+Select DBC:DOC data
+```{r}
+DBCDOC_hope <- 
+  BC %>%
+  filter(site == "Hope") %>%
+  select(c(date, dbc_concentration_mg_l, doc_concentration_mg_l)) %>%
+  mutate(DBC_DOC = (dbc_concentration_mg_l/doc_concentration_mg_l)*100) %>%
+  rename("DBC:DOC_%" = "DBC_DOC") %>%
+  mutate(date = as.Date(date),
+         measurement = "DBC:DOC") %>%
+  select(-c(dbc_concentration_mg_l, doc_concentration_mg_l))
+
+DBCDOC_hope <- full_join(Hope_discharge_daily, DBCDOC_hope)
+
+fig2data <- full_join(fig2data, DBCDOC_hope)
+
+```
+
+Plotting:
+```{r}
+
+# Calculate the rescaling factor
+rescale_DBCDOC <- 8974.525 / 8.75
+
+#Plot DBC:DOC
+BC_hope_DBCDOC_plot <-  filter(fig2data, measurement %in% c(NA, "DBC:DOC")) %>% ggplot(aes(x = date)) + 
+  geom_point(data = filter(fig2data, measurement == "DBC:DOC"),
+                aes(y = `DBC:DOC_%`,
+                color = "DBC:DOC (%)")) +
+  geom_line(data = filter(fig2data, measurement == "DBC:DOC"),
+                aes(y = `DBC:DOC_%`,
+                color = "DBC:DOC (%)",
+                linetype = "DBC:DOC (%)")) +
+  
+  geom_line(aes(y = hope_discharge_m3_s / rescale_DBCDOC,
+                color = "Discharge",
+                linetype = "Discharge")) +
+  
+  theme_classic() +
+  scale_x_date(limits = as.Date(c('1/3/2023', '28/2/2024'), format="%d/%m/%Y"),
+               date_breaks = "1 month",
+               date_labels = "%b %Y") +
+  labs(x = NULL) +
+  theme(axis.text.x = element_text(angle = 90),
+        legend.position = "none",
+        axis.title = element_text(size = 18),
+        axis.text = element_text(size = 14)) +
+  scale_color_manual(name = "Legend",
+                     breaks = c("DBC",
+                                "PBC",
+                                "DBC:DOC (%)",
+                                "Discharge"),
+                     values = c("#1B9E77",
+                                "#D95F02",
+                                "#7570B3",
+                                "#666666")) + 
+  scale_linetype_manual(name = "Legend", 
+                        breaks = c("DBC",
+                                "PBC",
+                                "DBC:DOC (%)",
+                                "Discharge"),
+                        values = c("solid",
+                                   "solid",
+                                   "solid",
+                                   "dashed")) + # Setting line type for Discharge line
+  scale_y_continuous(name = "DBC:DOC (%)",
+                labels = scales::comma,
+                sec.axis = sec_axis(~.*rescale_DBCDOC, name = expression('River discharge (m'^3*'s'^-1*')'),
+                                         labels = scales::comma))
+
+```
+
+
+
+##    Panel f: Discharge only
+```{r}
+discharge_plot <-  filter(fig2data, is.na(measurement) == TRUE) %>% 
+  ggplot(aes(x = date)) + 
+
+  geom_line(aes(y = hope_discharge_m3_s,
+                color = "Discharge",
+                linetype = "Discharge")) +
+  
+  theme_classic() +
+  scale_x_date(limits = as.Date(c('1/3/2023', '28/2/2024'), format="%d/%m/%Y"),
+               date_breaks = "1 month",
+               date_labels = "%b %Y") +
+  labs(x = NULL) +
+  theme(axis.text.x = element_text(angle = 90),
+        legend.position = "none",
+        axis.title = element_text(size = 18),
+        axis.text = element_text(size = 14)) +
+  scale_color_manual(name = "Legend",
+                     breaks = c("DBC",
+                                "PBC",
+                                "DBC:DOC (%)",
+                                "Discharge"),
+                     values = c("#1B9E77",
+                                "#D95F02",
+                                "#7570B3",
+                                "#666666")) + 
+  scale_linetype_manual(name = "Legend", 
+                        breaks = c("DBC",
+                                "PBC",
+                                "DBC:DOC (%)",
+                                "Discharge"),
+                        values = c("solid",
+                                   "solid",
+                                   "solid",
+                                   "dashed")) + # Setting line type for Discharge line
+  scale_y_continuous(name = expression('River discharge (m'^3*'s'^-1*')'),
+                labels = scales::comma)
+
+```
+
+
+
+##    Legend:
+```{r, fig.height = 1, fig.width = 12}
+legend_facet <- BC_hope_conc_plot +
+    geom_point(data = filter(fig2data, measurement == "DBC:DOC"),
+                aes(y = `DBC:DOC_%`,
+                color = "DBC:DOC (%)")) +
+  geom_line(data = filter(fig2data, measurement == "DBC:DOC"),
+                aes(y = `DBC:DOC_%`,
+                color = "DBC:DOC (%)",
+                linetype = "DBC:DOC (%)")) +
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 16),
+        legend.title = element_text(size = 20),
+        legend.key.size = unit(1, "cm")) 
+
+legend_facet <- get_legend(legend_facet) %>% 
+  as_ggplot()
+
+```
+
+##    Combine for final figure
+```{r, fig.width= 13, fig.height = 15}
+#First align the plots on the left side of the grid
+plots <- plot_grid(BC_hope_conc_plot,
+                     BC_hope_flux_plot,
+                     BC_hope_dbc_bpca_plot,
+                     BC_hope_pbc_bpca_plot,
+                     BC_hope_DBCDOC_plot,
+                     discharge_plot,
+                     align="hv", axis="tblr",
+                   labels = "auto",
+                   label_size = 18,
+                   scale = 0.9,
+                   ncol = 2)
+
+
+#add the legend
+figure2 <- plot_grid(plots,
+                     legend_facet,
+                     ncol = 1,
+                     rel_heights = c(9, 1))
+
+figure2
+
+```
+
