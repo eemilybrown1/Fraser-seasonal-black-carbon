@@ -12,8 +12,8 @@ Fraser River” by Emily Brown, Sasha Wagner, and Brian P. V. Hunt.
 
 All datasets needed to produce table 1 and figure 2 are included in this
 repository. The dataset “Brown_fraserseasonalblackcarbon_data.csv”
-contains original research data, which can be accessed from zenodo at
-\_\_\_.
+contains original research data, which can be accessed from zenodo with doi
+<10.5281/zenodo.14172042>.
 
 The dataset “hopedischarge_loadestflux.csv” contains river discharge
 data for the Fraser River at Hope, which is open source from Environment
