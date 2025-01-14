@@ -192,7 +192,7 @@ cormatdata <- cormatdata_incldate %>%
 ```{r}
 
 # Calculate correlation matrix
-res <- rcorr(as.matrix(cormatdata))
+res <- rcorr(as.matrix(cormatdata), type = "spearman")
 
 # Extract correlation coefficients (complete table, presented in supporting information)
 resr <- res$r
